@@ -396,6 +396,49 @@ function Sheet({title,vc,onClose,children}){
   )
 }
 
+
+// ── SQL SETUP BANNER ─────────────────────────────────────────────────────
+const SQL_SNIPPET = `-- Run in Supabase → SQL Editor
+create table if not exists board_settings(id text primary key default 'main',name text default 'CREW BOARD',updated_at timestamptz default now());
+insert into board_settings(id,name) values('main','CREW BOARD') on conflict do nothing;
+create table if not exists members(id text primary key,name text not null,color text not null,created_at timestamptz default now());
+create table if not exists member_vibes(member_id text primary key,vibe integer default 50,updated_at timestamptz default now());
+create table if not exists memories(id text primary key,type text not null,caption text,title text,artist text,vibe_note text,text_content text,tag text,member_id text,image_url text,audio_url text,created_at timestamptz default now());
+alter table board_settings enable row level security;
+alter table members enable row level security;
+alter table member_vibes enable row level security;
+alter table memories enable row level security;
+create policy "all" on board_settings for all using(true) with check(true);
+create policy "all" on members for all using(true) with check(true);
+create policy "all" on member_vibes for all using(true) with check(true);
+create policy "all" on memories for all using(true) with check(true);
+alter table board_settings replica identity full;
+alter table members replica identity full;
+alter table member_vibes replica identity full;
+alter table memories replica identity full;
+insert into storage.buckets(id,name,public) values('memories','memories',true) on conflict do nothing;
+create policy "pub" on storage.objects for all using(bucket_id='memories') with check(bucket_id='memories');`
+
+function SQLBanner({onDismiss}){
+  const[copied,setCopied]=useState(false)
+  const copy=()=>{navigator.clipboard?.writeText(SQL_SNIPPET).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),3000)})}
+  return(
+    <div style={{background:'#0e0e18',border:'1px solid #ff006655',margin:'10px 12px',borderRadius:8,padding:'14px 16px',display:'flex',flexDirection:'column',gap:10}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div style={{fontFamily:"'Chakra Petch',sans-serif",fontWeight:700,fontSize:12,color:'#ff0066',letterSpacing:'.08em'}}>⚡ RUN SQL TO SYNC</div>
+        <button onClick={onDismiss} style={{background:'none',border:'none',color:'#333',cursor:'pointer',fontSize:14}}>✕</button>
+      </div>
+      <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:10,color:'#555',lineHeight:1.7}}>
+        Supabase is connected but tables are missing.<br/>
+        <span style={{color:'#888'}}>supabase.com → your project → SQL Editor → paste → Run</span>
+      </div>
+      <button onClick={copy} style={{background:copied?'#00ffaa22':'#ff006622',border:`1px solid ${copied?'#00ffaa':'#ff0066'}66`,color:copied?'#00ffaa':'#ff0066',padding:'9px',fontFamily:"'Share Tech Mono',monospace",fontSize:10,cursor:'pointer',borderRadius:4,letterSpacing:'.1em',transition:'all .2s'}}>
+        {copied?'✓ SQL COPIED':'COPY SETUP SQL'}
+      </button>
+    </div>
+  )
+}
+
 // ── MAIN BOARD — works in both localStorage (local) and Supabase (shared) mode ─
 function BoardApp(){
   const[mems,setMems]=useState([]);const[members,setMembers]=useState([]);const[memberVibes,setMemberVibes]=useState({})
@@ -406,12 +449,26 @@ function BoardApp(){
   const[showQR,setShowQR]=useState(false);const[deletingIds,setDeletingIds]=useState(new Set())
   const vc=vibeColor(vibe)
 
-  // ── localStorage helpers ──
+  const[sbOk,setSbOk]=useState(false)
+  const[needsSQL,setNeedsSQL]=useState(false)
   const lsSaveMems=ms=>lsSet('rv_mems',ms.map(({imageData,audioData,...r})=>r))
-
+  const loadLocal=()=>{
+    const n=lsGet('rv_name');if(n){setName(n);setNVal(n)}
+    setMembers(lsGet('rv_members',[]))
+    setMemberVibes(lsGet('rv_mvibes',{}))
+    const ms=lsGet('rv_mems',[])
+    setMems(ms.map(m=>{
+      if(m.type==='photo'){const d=lsGet(`rv_ph_${m.id}`);if(d)m.imageData=d}
+      if(m.type==='track'){const d=lsGet(`rv_au_${m.id}`);if(d)m.audioData=d}
+      return m
+    }))
+    setLoading(false)
+  }
   useEffect(()=>{
-    if(isReady){
-      // ── Supabase mode ──
+    if(!isReady){loadLocal();return}
+    supabase.from('members').select('count',{count:'exact',head:true}).then(({error})=>{
+      if(error){setNeedsSQL(true);loadLocal();return}
+      setSbOk(true)
       Promise.all([
         supabase.from('board_settings').select('name').eq('id','main').maybeSingle(),
         supabase.from('members').select('*').order('created_at'),
@@ -423,7 +480,7 @@ function BoardApp(){
         if(mv)setMemberVibes(Object.fromEntries(mv.map(v=>[v.member_id,v.vibe])))
         if(me)setMems(me.map(dbToMem))
         setLoading(false)
-      }).catch(()=>setLoading(false))
+      }).catch(()=>loadLocal())
       const ch=supabase.channel('board')
         .on('postgres_changes',{event:'INSERT',schema:'public',table:'memories'},({new:r})=>setMems(p=>p.find(m=>m.id===r.id)?p:[dbToMem(r),...p]))
         .on('postgres_changes',{event:'DELETE',schema:'public',table:'memories'},({old:r})=>setMems(p=>p.filter(m=>m.id!==r.id)))
@@ -432,20 +489,7 @@ function BoardApp(){
         .on('postgres_changes',{event:'*',schema:'public',table:'member_vibes'},({new:r})=>setMemberVibes(p=>({...p,[r.member_id]:r.vibe})))
         .on('postgres_changes',{event:'UPDATE',schema:'public',table:'board_settings'},({new:r})=>{setName(r.name);setNVal(r.name)})
         .subscribe()
-      return()=>supabase.removeChannel(ch)
-    } else {
-      // ── localStorage mode ──
-      const n=lsGet('rv_name');if(n){setName(n);setNVal(n)}
-      setMembers(lsGet('rv_members',[]))
-      setMemberVibes(lsGet('rv_mvibes',{}))
-      const ms=lsGet('rv_mems',[])
-      setMems(ms.map(m=>{
-        if(m.type==='photo'){const d=lsGet(`rv_ph_${m.id}`);if(d)m.imageData=d}
-        if(m.type==='track'){const d=lsGet(`rv_au_${m.id}`);if(d)m.audioData=d}
-        return m
-      }))
-      setLoading(false)
-    }
+    }).catch(()=>loadLocal())
   },[])
 
   const addMem=async(d)=>{
@@ -457,7 +501,7 @@ function BoardApp(){
     if(m.audioData)lsSet(`rv_au_${id}`,m.audioData)
     const next=[m,...mems];setMems(next);lsSaveMems(next)
     // Then try to sync to Supabase in background
-    if(isReady){
+    if(sbOk){
       setUploading(true)
       let image_url=m.imageData,audio_url=m.audioData
       try{
@@ -476,7 +520,7 @@ function BoardApp(){
       lsSet('rv_mems',(lsGet('rv_mems',[])).filter(m=>m.id!==id))
       localStorage.removeItem(`rv_ph_${id}`);localStorage.removeItem(`rv_au_${id}`)
       setDeletingIds(p=>{const s=new Set(p);s.delete(id);return s})
-      if(isReady){
+      if(sbOk){
         supabase.from('memories').delete().eq('id',id).catch(()=>{})
         supabase.storage.from('memories').remove([`photos/${id}.jpg`,`audio/${id}`]).catch(()=>{})
       }
@@ -486,19 +530,19 @@ function BoardApp(){
   const addMember=n=>{
     const m={id:uid(),name:n,color:memberColor(members.length)}
     const next=[...members,m];setMembers(next);lsSet('rv_members',next)
-    if(isReady)supabase.from('members').insert(m).catch(()=>{})
+    if(sbOk)supabase.from('members').insert(m).catch(()=>{})
   }
   const removeMember=id=>{
     const next=members.filter(m=>m.id!==id);setMembers(next);lsSet('rv_members',next)
-    if(isReady)supabase.from('members').delete().eq('id',id).catch(()=>{})
+    if(sbOk)supabase.from('members').delete().eq('id',id).catch(()=>{})
   }
   const handleVibeChange=(mid,val)=>{
     setMemberVibes(p=>({...p,[mid]:val}));lsSet('rv_mvibes',{...memberVibes,[mid]:val})
-    if(isReady)supabase.from('member_vibes').upsert({member_id:mid,vibe:val,updated_at:new Date().toISOString()}).catch(()=>{})
+    if(sbOk)supabase.from('member_vibes').upsert({member_id:mid,vibe:val,updated_at:new Date().toISOString()}).catch(()=>{})
   }
   const saveName=v=>{
     setName(v);setEditN(false);lsSet('rv_name',v)
-    if(isReady)supabase.from('board_settings').upsert({id:'main',name:v,updated_at:new Date().toISOString()}).catch(()=>{})
+    if(sbOk)supabase.from('board_settings').upsert({id:'main',name:v,updated_at:new Date().toISOString()}).catch(()=>{})
     else lsSet('rv_name',v)
   }
   const saveVibe=v=>{setVibe(v);lsSet('rv_vibe',v)}
@@ -525,6 +569,7 @@ function BoardApp(){
       </div>}
 
       <InstallBanner/>
+      {needsSQL&&<SQLBanner onDismiss={()=>setNeedsSQL(false)}/>}
       <header style={{padding:'16px 18px 0',position:'sticky',top:0,background:'#020204cc',backdropFilter:'blur(14px)',zIndex:200}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',paddingBottom:10}}>
           {editN?(

@@ -396,7 +396,7 @@ function Sheet({title,vc,onClose,children}){
   )
 }
 
-// ── MAIN BOARD (requires Supabase) ────────────────────────────────────────
+// ── MAIN BOARD — works in both localStorage (local) and Supabase (shared) mode ─
 function BoardApp(){
   const[mems,setMems]=useState([]);const[members,setMembers]=useState([]);const[memberVibes,setMemberVibes]=useState({})
   const[loading,setLoading]=useState(true);const[uploading,setUploading]=useState(false)
@@ -406,84 +406,100 @@ function BoardApp(){
   const[showQR,setShowQR]=useState(false);const[deletingIds,setDeletingIds]=useState(new Set())
   const vc=vibeColor(vibe)
 
-  useEffect(()=>{
-    // Initial load
-    Promise.all([
-      supabase.from('board_settings').select('name').eq('id','main').maybeSingle(),
-      supabase.from('members').select('*').order('created_at'),
-      supabase.from('member_vibes').select('*'),
-      supabase.from('memories').select('*').order('created_at',{ascending:false}),
-    ]).then(([{data:bs},{data:mb},{data:mv},{data:me}])=>{
-      if(bs?.name){setName(bs.name);setNVal(bs.name)}
-      if(mb)setMembers(mb)
-      if(mv)setMemberVibes(Object.fromEntries(mv.map(v=>[v.member_id,v.vibe])))
-      if(me)setMems(me.map(dbToMem))
-      setLoading(false)
-    })
+  // ── localStorage helpers ──
+  const lsSaveMems=ms=>lsSet('rv_mems',ms.map(({imageData,audioData,...r})=>r))
 
-    // Real-time
-    const ch=supabase.channel('board')
-      .on('postgres_changes',{event:'INSERT',schema:'public',table:'memories'},({new:r})=>
-        setMems(p=>p.find(m=>m.id===r.id)?p:[dbToMem(r),...p]))
-      .on('postgres_changes',{event:'DELETE',schema:'public',table:'memories'},({old:r})=>
-        setMems(p=>p.filter(m=>m.id!==r.id)))
-      .on('postgres_changes',{event:'INSERT',schema:'public',table:'members'},({new:r})=>
-        setMembers(p=>p.find(m=>m.id===r.id)?p:[...p,r]))
-      .on('postgres_changes',{event:'DELETE',schema:'public',table:'members'},({old:r})=>
-        setMembers(p=>p.filter(m=>m.id!==r.id)))
-      .on('postgres_changes',{event:'*',schema:'public',table:'member_vibes'},({new:r})=>
-        setMemberVibes(p=>({...p,[r.member_id]:r.vibe})))
-      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'board_settings'},({new:r})=>
-        {setName(r.name);setNVal(r.name)})
-      .subscribe()
-    return()=>supabase.removeChannel(ch)
+  useEffect(()=>{
+    if(isReady){
+      // ── Supabase mode ──
+      Promise.all([
+        supabase.from('board_settings').select('name').eq('id','main').maybeSingle(),
+        supabase.from('members').select('*').order('created_at'),
+        supabase.from('member_vibes').select('*'),
+        supabase.from('memories').select('*').order('created_at',{ascending:false}),
+      ]).then(([{data:bs},{data:mb},{data:mv},{data:me}])=>{
+        if(bs?.name){setName(bs.name);setNVal(bs.name)}
+        if(mb)setMembers(mb)
+        if(mv)setMemberVibes(Object.fromEntries(mv.map(v=>[v.member_id,v.vibe])))
+        if(me)setMems(me.map(dbToMem))
+        setLoading(false)
+      }).catch(()=>setLoading(false))
+      const ch=supabase.channel('board')
+        .on('postgres_changes',{event:'INSERT',schema:'public',table:'memories'},({new:r})=>setMems(p=>p.find(m=>m.id===r.id)?p:[dbToMem(r),...p]))
+        .on('postgres_changes',{event:'DELETE',schema:'public',table:'memories'},({old:r})=>setMems(p=>p.filter(m=>m.id!==r.id)))
+        .on('postgres_changes',{event:'INSERT',schema:'public',table:'members'},({new:r})=>setMembers(p=>p.find(m=>m.id===r.id)?p:[...p,r]))
+        .on('postgres_changes',{event:'DELETE',schema:'public',table:'members'},({old:r})=>setMembers(p=>p.filter(m=>m.id!==r.id)))
+        .on('postgres_changes',{event:'*',schema:'public',table:'member_vibes'},({new:r})=>setMemberVibes(p=>({...p,[r.member_id]:r.vibe})))
+        .on('postgres_changes',{event:'UPDATE',schema:'public',table:'board_settings'},({new:r})=>{setName(r.name);setNVal(r.name)})
+        .subscribe()
+      return()=>supabase.removeChannel(ch)
+    } else {
+      // ── localStorage mode ──
+      const n=lsGet('rv_name');if(n){setName(n);setNVal(n)}
+      setMembers(lsGet('rv_members',[]))
+      setMemberVibes(lsGet('rv_mvibes',{}))
+      const ms=lsGet('rv_mems',[])
+      setMems(ms.map(m=>{
+        if(m.type==='photo'){const d=lsGet(`rv_ph_${m.id}`);if(d)m.imageData=d}
+        if(m.type==='track'){const d=lsGet(`rv_au_${m.id}`);if(d)m.audioData=d}
+        return m
+      }))
+      setLoading(false)
+    }
   },[])
 
   const addMem=async(d)=>{
-    setModal(null);setUploading(true)
+    setModal(null)
     const id=uid()
-    let image_url=null,audio_url=null
-
-    if(d.imageData){
-      try{
-        const blob=await fetch(d.imageData).then(r=>r.blob())
-        await supabase.storage.from('memories').upload(`photos/${id}.jpg`,blob,{contentType:'image/jpeg',upsert:true})
-        image_url=supabase.storage.from('memories').getPublicUrl(`photos/${id}.jpg`).data.publicUrl
-      }catch(e){console.error('Image upload failed',e)}
+    if(isReady){
+      setUploading(true)
+      let image_url=null,audio_url=null
+      if(d.imageData){try{const blob=await fetch(d.imageData).then(r=>r.blob());await supabase.storage.from('memories').upload(`photos/${id}.jpg`,blob,{contentType:'image/jpeg',upsert:true});image_url=supabase.storage.from('memories').getPublicUrl(`photos/${id}.jpg`).data.publicUrl}catch(e){console.error(e)}}
+      if(d.audioData){try{const blob=await fetch(d.audioData).then(r=>r.blob());await supabase.storage.from('memories').upload(`audio/${id}`,blob,{upsert:true});audio_url=supabase.storage.from('memories').getPublicUrl(`audio/${id}`).data.publicUrl}catch(e){console.error(e)}}
+      await supabase.from('memories').insert({id,type:d.type,caption:d.caption||null,title:d.title||null,artist:d.artist||null,vibe_note:d.vibe||null,text_content:d.text||null,tag:d.tag||null,member_id:d.memberId||null,image_url,audio_url})
+      setUploading(false)
+    } else {
+      const m={...d,id,createdAt:Date.now()}
+      if(m.imageData)lsSet(`rv_ph_${id}`,m.imageData)
+      if(m.audioData)lsSet(`rv_au_${id}`,m.audioData)
+      const next=[m,...mems];setMems(next);lsSaveMems(next)
     }
-    if(d.audioData){
-      try{
-        const blob=await fetch(d.audioData).then(r=>r.blob())
-        await supabase.storage.from('memories').upload(`audio/${id}`,blob,{upsert:true})
-        audio_url=supabase.storage.from('memories').getPublicUrl(`audio/${id}`).data.publicUrl
-      }catch(e){console.error('Audio upload failed',e)}
-    }
-
-    await supabase.from('memories').insert({
-      id,type:d.type,caption:d.caption||null,title:d.title||null,
-      artist:d.artist||null,vibe_note:d.vibe||null,text_content:d.text||null,
-      tag:d.tag||null,member_id:d.memberId||null,image_url,audio_url,
-    })
-    setUploading(false)
   }
 
   const delMem=id=>{
     setDeletingIds(p=>new Set([...p,id]))
     setTimeout(async()=>{
-      await supabase.from('memories').delete().eq('id',id)
-      await supabase.storage.from('memories').remove([`photos/${id}.jpg`,`audio/${id}`])
+      if(isReady){
+        await supabase.from('memories').delete().eq('id',id)
+        await supabase.storage.from('memories').remove([`photos/${id}.jpg`,`audio/${id}`])
+      } else {
+        lsSet('rv_mems',(lsGet('rv_mems',[])).filter(m=>m.id!==id))
+        localStorage.removeItem(`rv_ph_${id}`);localStorage.removeItem(`rv_au_${id}`)
+      }
       setMems(p=>p.filter(m=>m.id!==id))
       setDeletingIds(p=>{const s=new Set(p);s.delete(id);return s})
     },380)
   }
 
-  const addMember=async n=>{await supabase.from('members').insert({id:uid(),name:n,color:memberColor(members.length)})}
-  const removeMember=async id=>{await supabase.from('members').delete().eq('id',id)}
+  const addMember=async n=>{
+    const m={id:uid(),name:n,color:memberColor(members.length)}
+    if(isReady){await supabase.from('members').insert(m)}
+    else{const next=[...members,m];setMembers(next);lsSet('rv_members',next)}
+  }
+  const removeMember=async id=>{
+    if(isReady){await supabase.from('members').delete().eq('id',id)}
+    else{const next=members.filter(m=>m.id!==id);setMembers(next);lsSet('rv_members',next)}
+  }
   const handleVibeChange=async(mid,val)=>{
     setMemberVibes(p=>({...p,[mid]:val}))
-    await supabase.from('member_vibes').upsert({member_id:mid,vibe:val,updated_at:new Date().toISOString()})
+    if(isReady)await supabase.from('member_vibes').upsert({member_id:mid,vibe:val,updated_at:new Date().toISOString()})
+    else lsSet('rv_mvibes',{...memberVibes,[mid]:val})
   }
-  const saveName=async v=>{setName(v);setEditN(false);await supabase.from('board_settings').upsert({id:'main',name:v,updated_at:new Date().toISOString()})}
+  const saveName=async v=>{
+    setName(v);setEditN(false)
+    if(isReady)await supabase.from('board_settings').upsert({id:'main',name:v,updated_at:new Date().toISOString()})
+    else lsSet('rv_name',v)
+  }
   const saveVibe=v=>{setVibe(v);lsSet('rv_vibe',v)}
   const getMember=id=>members.find(m=>m.id===id)
   const col1=mems.filter((_,i)=>i%2===0),col2=mems.filter((_,i)=>i%2===1)
@@ -552,6 +568,5 @@ function BoardApp(){
 }
 
 export default function RaveBoard(){
-  if(!isReady)return<SetupScreen/>
   return<BoardApp/>
 }

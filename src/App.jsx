@@ -397,6 +397,21 @@ function Sheet({title,vc,onClose,children}){
 }
 
 
+// ── SYNC BADGE ───────────────────────────────────────────────────────────
+function SyncBadge({sbOk,uploading,isReady}){
+  let dot,label,color,pulse
+  if(uploading){dot='◉';label='SYNCING';color='#ffcc00';pulse=true}
+  else if(sbOk){dot='◉';label='LIVE';color='#00ffaa';pulse=false}
+  else if(isReady){dot='◎';label='SETUP';color='#ff6600';pulse=false}
+  else{dot='◌';label='LOCAL';color='#333';pulse=false}
+  return(
+    <div style={{display:'flex',alignItems:'center',gap:5,padding:'3px 8px',background:`${color}15`,border:`1px solid ${color}44`,borderRadius:20}}>
+      <div style={{fontSize:7,color,animation:pulse?'dotPulse 1s infinite ease-in-out':'none',lineHeight:1}}>{dot}</div>
+      <span style={{fontFamily:"'Share Tech Mono',monospace",fontSize:8,color,letterSpacing:'.1em'}}>{label}</span>
+    </div>
+  )
+}
+
 // ── SQL SETUP BANNER ─────────────────────────────────────────────────────
 const SETUP_SQL=`create table if not exists board_settings(id text primary key default 'main',name text default 'CREW BOARD',updated_at timestamptz default now());
 insert into board_settings(id,name)values('main','CREW BOARD')on conflict do nothing;
@@ -588,8 +603,11 @@ function BoardApp(){
           ):(
             <>
               <h1 className="tg" onClick={()=>setEditN(true)} style={{fontFamily:"'Chakra Petch',sans-serif",fontWeight:700,fontSize:'clamp(20px,5.5vw,32px)',color:vc,letterSpacing:'-.01em',cursor:'pointer',userSelect:'none',textShadow:`0 0 18px ${vc}55`,transition:'color .4s,text-shadow .4s'}}>{name}</h1>
-              <div style={{display:'flex',gap:9,fontFamily:"'Share Tech Mono',monospace",fontSize:8,color:'#1e1e2a',letterSpacing:'.1em'}}>
-                {[['photo','IMG'],['track','AUD'],['note','TXT']].map(([t,l])=><span key={t}>{l}&nbsp;{mems.filter(m=>m.type===t).length}</span>)}
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <div style={{display:'flex',gap:7,fontFamily:"'Share Tech Mono',monospace",fontSize:8,color:'#1e1e2a',letterSpacing:'.1em'}}>
+                  {[['photo','IMG'],['track','AUD'],['note','TXT']].map(([t,l])=><span key={t}>{l}&nbsp;{mems.filter(m=>m.type===t).length}</span>)}
+                </div>
+                <SyncBadge sbOk={sbOk} uploading={uploading} isReady={isReady}/>
               </div>
             </>
           )}

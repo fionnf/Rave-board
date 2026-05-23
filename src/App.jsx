@@ -466,6 +466,7 @@ function BoardApp(){
   const[sbOk,setSbOk]=useState(false)
   const[needsSQL,setNeedsSQL]=useState(false)
   const uploadingRef=useRef(false)
+  const pendingIds=useRef(new Set())
   const vc=vibeColor(vibe)
 
   const lsSaveMems=ms=>lsSet('rv_mems',ms.map(({imageData,audioData,...r})=>r))
@@ -492,10 +493,23 @@ function BoardApp(){
         supabase.from('member_vibes').select('*'),
         supabase.from('memories').select('*').order('created_at',{ascending:false}),
       ])
+      const pids=pendingIds.current
       if(bs?.name)setName(bs.name)
-      if(mb)setMembers(mb)
+      if(mb)setMembers(prev=>{
+        // Remove confirmed items from pending
+        mb.forEach(m=>{if(pids.has(m.id))pids.delete(m.id)})
+        // Keep any pending items not yet in Supabase
+        const sbIds=new Set(mb.map(m=>m.id))
+        const stillPending=prev.filter(m=>pids.has(m.id)&&!sbIds.has(m.id))
+        return [...mb,...stillPending]
+      })
       if(mv)setMemberVibes(Object.fromEntries(mv.map(v=>[v.member_id,v.vibe])))
-      if(me)setMems(me.map(dbToMem))
+      if(me)setMems(prev=>{
+        me.forEach(m=>{if(pids.has(m.id))pids.delete(m.id)})
+        const sbIds=new Set(me.map(m=>m.id))
+        const stillPending=prev.filter(m=>pids.has(m.id)&&!sbIds.has(m.id))
+        return [...me.map(dbToMem),...stillPending]
+      })
       setLoading(false)
     }catch(e){console.warn('sync error',e)}
   }
@@ -519,6 +533,7 @@ function BoardApp(){
   const addMem=async(d)=>{
     setModal(null)
     const id=uid()
+    pendingIds.current.add(id)
     // Show immediately
     const m={...d,id,createdAt:Date.now()}
     if(m.imageData)lsSet(`rv_ph_${id}`,m.imageData)
@@ -554,7 +569,7 @@ function BoardApp(){
   const addMember=n=>{
     const m={id:uid(),name:n,color:memberColor(members.length)}
     const next=[...members,m];setMembers(next);lsSet('rv_members',next)
-    if(sbOk)supabase.from('members').insert(m).catch(()=>{})
+    if(sbOk){pendingIds.current.add(m.id);supabase.from('members').insert(m).catch(()=>{})}
   }
   const removeMember=id=>{
     const next=members.filter(m=>m.id!==id);setMembers(next);lsSet('rv_members',next)
